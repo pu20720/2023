@@ -1,3 +1,3 @@
 BatchNorm.py為模型架構程式碼
-Training.py為訓練模型程式碼
+TrainingModlue.py為訓練模型程式碼
 Data.py為模型訓練或載入模型時使用圖片資料集之方法
