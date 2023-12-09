@@ -1,8 +1,0 @@
-{
-    "lib": "libvart-dpu-runner.so",
-    "filename": "Project_Data_sn_Double.xmodel",
-    "kernel": [
-        "subgraph_VGG16_Model__VGG16_Model_AdaptiveAvgPool2d_globe_avg_pool__1996_fix"
-    ],
-    "target": "DPUCZDX8G_ISA1_B4096_0101000047010407"
-}
