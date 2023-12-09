@@ -9,8 +9,16 @@
 * 第1次畢業專題會議記錄.pdf
 * 第2次畢業專題會議記錄.pdf
 ## 畢業專題計畫書：
+專題計畫書.pdf
 ## 成果報告書：
+成果報告書.pdf
 ## 程式：
+* 後端 : /程式碼/MonitorBackend.zip
+* 樹莓派 : /程式碼/MonitorPI.zip
+* APP : /程式碼/MonitorUI.zip
 ## 簡報
+專題簡報.pdf
 ## 海報：
+居家監控.jpg
 ## 介紹影片
+https://youtu.be/IUT0Pw1gqVo
