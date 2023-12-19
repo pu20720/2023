@@ -1,0 +1,435 @@
+#define GPRMC_TERM "$GPRMC,"              //定義要解析的指令，因為這條指令包含定位和時間信息
+char nmeaSentence[68];                    //宣告矩陣，用於存取GPS值
+String latitude;                          //緯度
+String longitude;                         //經度
+String latitude_thingspeak = "";   //緯度
+String longitude_thingspeak = ""; //經度
+
+// 將經緯度轉換為十進制格式
+float decimalLatitude = 0;
+float decimalLongitude = 0;
+String lndSpeed;                          //速度
+String gpsTime;                           // UTC時間，本初子午線經度0度的時間，和北京時間差8小時
+String beiJingTime;                       //北京時間
+#include <HTTPClient.h>
+#include <WiFi.h>
+const char* ssid = "21";
+const char* password = "12121212";
+String url = "http://api.thingspeak.com/update?api_key=GGHL3Q0FOIYTBLHI";
+
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+Adafruit_MPU6050 mpu;
+
+
+#include <TridentTD_LineNotify.h>
+#define LINE_TOKEN  "qsPV3zAt7mhw73Zmkz8RpVWXf79fL2eva9U68kINNfA"
+bool SensorStatus = false;
+unsigned long Sensor_timer = 0;
+unsigned long line_notify_timer = 0;
+unsigned long Thingspeak_timer = 0;
+unsigned long begin_time; //記錄時間
+unsigned long total_time; //測距一共花費時間
+//unsigned long LED_time; //記錄LED切換時間，每隔一段時間判斷光線狀態切換LED亮滅
+int Threshold = 3;
+
+#define LED  18
+unsigned long LED_TIME = 0;
+#define BUTTON  25
+unsigned long BUTTON_TIME = 0;
+#define buzzer 23 //蜂鳴器接到ESP32的26
+unsigned long  buzzer_TIME = 0;
+
+//匯入ws2812 LED模組控制庫
+#include <Adafruit_NeoPixel.h>
+#define PIN   26 //LED控制腳接到的ESP32的第26pin
+#define NUMPIXELS 16 //led數量
+Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+unsigned long LED_time; //記錄LED切換時間，每隔一段時間判斷光線狀態切換LED亮滅
+
+#define light_sensr 32 //光敏電阻電壓輸入腳接到ESP32的32
+int Light_Voltage; //光線電壓值數值
+
+void setup()
+{
+  delay(2000);
+  pinMode(buzzer, OUTPUT);
+  digitalWrite(buzzer, LOW);
+  Serial.begin(9600);
+
+  if (!mpu.begin(0x68)) {
+    Serial.println("Sensor init failed");
+    while (1)
+      yield();
+  }
+  mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
+  mpu.setGyroRange(MPU6050_RANGE_250_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  Serial.println("Found a MPU-6050 sensor");
+  // Wait for connection
+  WiFi.begin(ssid, password); // Connect to the network
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial2.begin(9600);     // GPS接腳
+  Serial2.setTimeout(100);
+  pinMode(2, INPUT_PULLUP);
+  LINE.setToken(LINE_TOKEN);
+  LINE.notify("begin");
+  pinMode(BUTTON, INPUT_PULLUP);
+  pinMode(light_sensr, INPUT);
+  BUTTON_TIME = millis();
+  pixels.begin();//LED初始化
+}
+
+void loop()
+{
+  //讀取光線電壓值後和之前值取平均
+  Light_Voltage = (Light_Voltage + analogRead(light_sensr)) / 2;
+  //每隔3000毫秒判斷，光線值是否小於Threshold，如果是則打開燈
+  //否則關閉燈
+  static int LED_mode = 0;
+  if (millis() - LED_time > 3000)
+  {
+    if (Light_Voltage < 600)
+    {
+      LED_mode = 1;
+    }
+    else
+    {
+      LED_mode = 0;
+    }
+    LED_time = millis();
+    Serial.print("Light=");
+    Serial.println(analogRead(light_sensr));
+  }
+  static unsigned long LED_blink_time = 0;
+  static int last_status = 1;
+  if (LED_mode == 1)
+  {
+    last_status = 1;
+    static int ON = 0;
+    if (millis() - LED_blink_time > 500)
+    {
+      LED_blink_time = millis();
+      if (ON == 1)
+      {
+        for (int i = 0; i < NUMPIXELS; i++) {
+          pixels.setPixelColor(i, pixels.Color(150, 150, 150));
+        }
+        pixels.show();
+      }
+      else
+      {
+        pixels.clear(); // Set all pixel colors to 'off'
+        pixels.show();
+      }
+      ON = !ON;
+    }
+  }
+  else
+  {
+    if (last_status != 0)
+    {
+      last_status = 0;
+      pixels.clear(); // Set all pixel colors to 'off'
+      pixels.show();
+      pixels.clear(); // Set all pixel colors to 'off'
+      pixels.show();
+      pixels.clear(); // Set all pixel colors to 'off'
+      pixels.show();
+      pixels.clear(); // Set all pixel colors to 'off'
+      pixels.show();
+    }
+  }
+
+  //獲取IMU角度狀態
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  //如果角度連續偵測到為跌倒角度則發line提醒
+  if (abs(a.acceleration.x) > Threshold or abs(a.acceleration.y) > Threshold)
+  {
+    if (millis() - Sensor_timer >= 5000)
+    {
+      SensorStatus = true;
+    }
+    delay(10);
+  }
+  else
+  {
+    SensorStatus = false;
+    Sensor_timer = millis();
+  }
+  //如果數值大於設定數值，且時間間隔多於10秒，發line警報
+  if (SensorStatus == true and millis() - line_notify_timer >= 10000)
+  {
+    SensorStatus = false;
+    LINE.notify("請注意，用戶可能跌倒。");
+    LINE.notify("用戶GPS位置信息" + latitude_thingspeak + "," + longitude_thingspeak);
+    line_notify_timer = millis();
+    buzzer_TIME = millis();
+  }
+
+  //獲取GPS經度緯度存到latitude_thingspeak與longitude_thingspeak變數中
+  while (Serial2.available()) //串口獲取到數據開始解析
+  {
+    char c = Serial2.read(); //讀取一個字節獲取的數據
+    switch (c)               //判斷該字節的值
+    {
+      case '$':                                        //若是$，則說明是一幀數據的開始
+        Serial2.readBytesUntil('*', nmeaSentence, 67); //讀取接下來的數據，存放在nmeaSentence字符數組中，最大存放67個字節
+        latitude = parseGprmcLat(nmeaSentence);        //獲取緯度值
+        longitude = parseGprmcLon(nmeaSentence);       //獲取經度值
+        Serial.println(nmeaSentence);
+        if (latitude.length() > 3)                           //當不是空時候打印輸出
+        {
+          Serial.println(latitude_thingspeak);
+          latitude = latitude.substring(0, latitude.length() - 2);
+          latitude_thingspeak = latitude; //存在latitude_thingspeak變數
+        }
+        if (longitude.length() > 3) //當不是空時候打印輸出
+        {
+          Serial.println(latitude_thingspeak);
+          longitude = longitude.substring(0, longitude.length() - 2);
+          longitude_thingspeak = longitude; //存在longitude_thingspeak變數
+        }
+    }
+  }
+
+  delay(1);
+  //如果按鈕被連續按下1500毫秒則發line提醒
+  if (digitalRead(BUTTON) == 0  )
+  {
+    if (millis() - BUTTON_TIME > 1500)
+    {
+      buzzer_TIME = millis();
+      //如果數值大於設定數值，且時間間隔多於10秒，發line警報
+      if (millis() - line_notify_timer >= 3000)
+      {
+        LINE.notify("用戶按下按鈕求救。");
+        LINE.notify("用戶GPS位置信息" + latitude_thingspeak + "," + longitude_thingspeak);
+        line_notify_timer = millis();
+      }
+    }
+  }
+  else
+  {
+    BUTTON_TIME = millis();
+  }
+
+  //如果蜂鳴器被觸發，蜂鳴器會連續嚮5秒後停下，直到下次觸發
+  if (millis() - buzzer_TIME < 5000)
+  {
+    digitalWrite(buzzer, HIGH);
+  }
+  else
+  {
+    digitalWrite(buzzer, LOW);
+  }
+
+  //沒隔20秒上傳GPS經度與緯度到thingspeak
+  if (millis() - Thingspeak_timer >= 20000 and latitude_thingspeak != "" and longitude_thingspeak != "" )
+  {
+    HTTPClient http;
+    String url1 = url + "&field1=" + latitude_thingspeak + "&field2=" + longitude_thingspeak;
+    Serial.println(url1);
+    //http client取得網頁內容
+    http.begin(url1);
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK)      {
+      //讀取網頁內容到payload
+      String payload = http.getString();
+      //將內容顯示出來
+      Serial.print("網頁內容=");
+      Serial.println(payload);
+    } else {
+      //讀取失敗
+      Serial.println("網路傳送失敗");
+    }
+    http.end();
+    Thingspeak_timer = millis();
+    latitude_thingspeak = "";
+    longitude_thingspeak = "";
+  }
+}
+
+
+String convertToDecimalDegrees(float value) {
+  int degrees = value;
+  int minutes = (value - degrees) * 60;
+  float seconds = (value - degrees - minutes / 60.0) * 3600;
+
+  float result = degrees + (minutes / 60.0) + (seconds / 3600.0);
+  return String(result);
+}
+
+String getBeiJingTime(String s)
+{
+  int hour = s.substring(0, 2).toInt();
+  int minute = s.substring(2, 4).toInt();
+  int second = s.substring(4, 6).toInt();
+
+  hour += 8;
+
+  if (hour > 24)
+    hour -= 24;
+  s = String(hour) + String(minute) + String(second);
+  return s;
+}
+
+// Parse GPRMC NMEA sentence data from String
+// String must be GPRMC or no data will be parsed
+// Return Latitude
+String parseGprmcLat(String s)
+{
+  int pLoc = 0;    // paramater location pointer
+  int lEndLoc = 0; // lat parameter end location
+  int dEndLoc = 0; // direction parameter end location
+  String lat;
+  /*make sure that we are parsing the GPRMC string.
+    Found that setting s.substring(0,5) == "GPRMC" caused a FALSE.
+    There seemed to be a 0x0D and 0x00 character at the end. */
+  if (s.substring(0, 4) == "GPRM")
+  {
+    // Serial.println(s);
+    for (int i = 0; i < 5; i++)
+    {
+      if (i < 3)
+      {
+        pLoc = s.indexOf(',', pLoc + 1);
+        /*Serial.print("i < 3, pLoc: ");
+          Serial.print(pLoc);
+          Serial.print(", ");
+          Serial.println(i);*/
+      }
+      if (i == 3)
+      {
+        lEndLoc = s.indexOf(',', pLoc + 1);
+        lat = s.substring(pLoc + 1, lEndLoc);
+      }
+      else
+      {
+        dEndLoc = s.indexOf(',', lEndLoc + 1);
+        lat = lat + " " + s.substring(lEndLoc + 1, dEndLoc);
+      }
+    }
+    return lat;
+  }
+}
+
+// Parse GPRMC NMEA sentence data from String
+// String must be GPRMC or no data will be parsed
+// Return Longitude
+String parseGprmcLon(String s)
+{
+  int pLoc = 0;    // paramater location pointer
+  int lEndLoc = 0; // lat parameter end location
+  int dEndLoc = 0; // direction parameter end location
+  String lon;
+
+  /*make sure that we are parsing the GPRMC string.
+    Found that setting s.substring(0,5) == "GPRMC" caused a FALSE.
+    There seemed to be a 0x0D and 0x00 character at the end. */
+  if (s.substring(0, 4) == "GPRM")
+  {
+    // Serial.println(s);
+    for (int i = 0; i < 7; i++)
+    {
+      if (i < 5)
+      {
+        pLoc = s.indexOf(',', pLoc + 1);
+        /*Serial.print("i < 3, pLoc: ");
+          Serial.print(pLoc);
+          Serial.print(", ");
+          Serial.println(i);*/
+      }
+      if (i == 5)
+      {
+        lEndLoc = s.indexOf(',', pLoc + 1);
+        lon = s.substring(pLoc + 1, lEndLoc);
+      }
+      else
+      {
+        dEndLoc = s.indexOf(',', lEndLoc + 1);
+        lon = lon + " " + s.substring(lEndLoc + 1, dEndLoc);
+      }
+    }
+    return lon;
+  }
+}
+
+// Parse GPRMC NMEA sentence data from String
+// String must be GPRMC or no data will be parsed
+// Return Longitude
+String parseGprmcSpeed(String s)
+{
+  int pLoc = 0;    // paramater location pointer
+  int lEndLoc = 0; // lat parameter end location
+  int dEndLoc = 0; // direction parameter end location
+  String lndSpeed;
+
+  /*make sure that we are parsing the GPRMC string.
+    Found that setting s.substring(0,5) == "GPRMC" caused a FALSE.
+    There seemed to be a 0x0D and 0x00 character at the end. */
+  if (s.substring(0, 4) == "GPRM")
+  {
+    // Serial.println(s);
+    for (int i = 0; i < 8; i++)
+    {
+      if (i < 7)
+      {
+        pLoc = s.indexOf(',', pLoc + 1);
+      }
+      else
+      {
+        lEndLoc = s.indexOf(',', pLoc + 1);
+        lndSpeed = s.substring(pLoc + 1, lEndLoc);
+      }
+    }
+    return lndSpeed;
+  }
+}
+
+// Parse GPRMC NMEA sentence data from String
+// String must be GPRMC or no data will be parsed
+// Return Longitude
+String parseGprmcTime(String s)
+{
+  int pLoc = 0;    // paramater location pointer
+  int lEndLoc = 0; // lat parameter end location
+  int dEndLoc = 0; // direction parameter end location
+  String gpsTime;
+
+  /*make sure that we are parsing the GPRMC string.
+    Found that setting s.substring(0,5) == "GPRMC" caused a FALSE.
+    There seemed to be a 0x0D and 0x00 character at the end. */
+  if (s.substring(0, 4) == "GPRM")
+  {
+    // Serial.println(s);
+    for (int i = 0; i < 2; i++)
+    {
+      if (i < 1)
+      {
+        pLoc = s.indexOf(',', pLoc + 1);
+      }
+      else
+      {
+        lEndLoc = s.indexOf(',', pLoc + 1);
+        gpsTime = s.substring(pLoc + 1, lEndLoc);
+      }
+    }
+    return gpsTime;
+  }
+}
+
+// Turn char[] array into String object
+String charToString(char *c)
+{
+  String val = "";
+  for (int i = 0; i <= sizeof(c); i++)
+  {
+    val = val + c[i];
+  }
+  return val;
+}
